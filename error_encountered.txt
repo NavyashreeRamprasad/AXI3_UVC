@@ -1,0 +1,27 @@
+E1 ) was able to write data successfully but same data was written twice and the last two data wasnt read 
+Sol ) saw it in the simulation log so implemented a ignore_first_write_beat_f flag which ignored the first write happening and thus the issue was resolved
+
+
+E2) valid ready handshake problem in rdata channel ie ready wasnt going low sooner was high for very long after valid
+Sol ) added read_data function inside a fork join_none block  
+
+E3) in multiple transactions the rdata wasn't coming as expected few last data from one transaction was lost , problem detected was at same time two data were read ie at time 265 two times read was happening so the number of transactions reduced
+Sol) we implemented a clocking block for the responder and deactivated the clocking block for driver , also removed the ignore first data flag , thus now multiple reads and writes were happening properly
+
+E4) simulation hung at time 0 right after the UVM topology print; no driver "Got item" message and no further log
+Sol) pressed Ctrl-C and used the stack command in ucli, which pointed to axi_scb::run. The scoreboard had a forever loop that only checked if(msttxQ.size()>0 && slvtxQ.size()>0) and never waited, so it kept looping at time 0 and the clock could not advance. Replaced the if with wait(msttxQ.size()>0 && slvtxQ.size()>0) so the task blocks until both queues have data
+
+E5)E6) Handshake never completed on any channel in the waveform. awvalid went high and awready pulsed, but the address payload (awid, awaddr, awlen, awsize, awburst) dropped back to 0 almost immediately, so valid and ready were never both high at a posedge. The monitor therefore saw no AW, W, AR or R handshakes, nothing reached the scoreboard or the coverage subscriber, and the run phase ended early (around time 2325). W and B activity also appeared before any AW handshake, which caused the “Null object access” error in the monitor.
+
+Sol) Dumped the waveform and checked clk, rst, and the aw/w/b signals. The cause was in the driver, where the handshakes used wait(vif.xxready==1), which is level-sensitive and not tied to the clock. The driver cleared valid and the payload in the same time step that ready went high, before the next posedge where the monitor samples. Replaced it with a clocked wait on every channel:
+
+write_addr: drive the payload and awvalid, then do @(posedge vif.clk); while(!vif.awready);, then clear awvalid.
+write_data: drive each beat, then do @(posedge vif.clk); while(!vif.wready); per beat. Moved wvalid <= 0 to right after the last handshake, which also removed the extra write beat.
+write_resp: set bready and wait on a clock edge for bvalid.
+read_addr: same pattern as write_addr, using arvalid and arready.
+read_data: keep rready high for the whole burst and use one do @(posedge vif.clk); while(!vif.rvalid); per beat. This removed the stale rvalid miscount.
+
+After this, valid and ready were both high at a posedge, the monitor saw the handshakes, ap_port.write() reached cov and the scoreboard, and the test started passing with nonzero match.
+
+E7) coverage printed 0.00% in the log even though 20 write/read txs were sampled and the scoreboard showed match = 20
+Sol) get_inst_coverage() returns 0 unless the covergroup has option.per_instance = 1. Added it inside axi_cg (get_coverage() also works for the cumulative score), and the real percentage showed up
